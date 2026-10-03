@@ -1,4 +1,3 @@
-
 from app.schemas.agent_state import SearchState
 import os
 
@@ -14,15 +13,73 @@ def _safe_value(value):
         return value
 
 
+def _normalize_property_name(property_name):
+    """
+    Normalize natural-language property names into the canonical names
+    used internally by MatSearch AI.
+    """
+    if not isinstance(property_name, str):
+        return property_name
+
+    normalized = property_name.strip().lower()
+
+    aliases = {
+        "band gap": "band_gap",
+        "bandgap": "band_gap",
+        "band_gap": "band_gap",
+        "density": "density",
+        "volume": "volume",
+        "stability": "stability",
+        "thermodynamic stability": "stability",
+        "thermodynamic_stability": "stability",
+        "energy above hull": "energy_above_hull",
+        "energy_above_hull": "energy_above_hull",
+    }
+
+    return aliases.get(normalized, normalized)
+
+
+def _build_range(constraint):
+    """
+    Convert a parsed constraint into a Materials Project range.
+
+    Materials Project supports tuple ranges such as:
+        (minimum, maximum)
+    with None allowed for an open side.
+    """
+    operator = str(constraint.get("operator", "")).strip().lower()
+
+    minimum = constraint.get("min")
+    maximum = constraint.get("max")
+
+    if operator in {"between", "range"}:
+        return (minimum, maximum)
+
+    if operator in {"<", "lt", "less_than"}:
+        return (None, maximum)
+
+    if operator in {"<=", "le", "less_than_or_equal"}:
+        return (None, maximum)
+
+    if operator in {">", "gt", "greater_than"}:
+        return (minimum, None)
+
+    if operator in {">=", "ge", "greater_than_or_equal"}:
+        return (minimum, None)
+
+    if operator in {"=", "==", "eq", "equals"}:
+        return (minimum, maximum if maximum is not None else minimum)
+
+    # Safe fallback for a numerical min/max constraint.
+    return (minimum, maximum)
+
+
 def run(state: SearchState) -> SearchState:
     """
     Retrieve real candidate materials from the Materials Project.
 
-    Important:
-    - Materials Project is the source of numerical material properties.
-    - No material properties are invented here.
-    - Ambiguous natural-language requirements are not converted into
-      arbitrary numerical thresholds.
+    Materials Project is the source of numerical material properties.
+    No material properties are invented here.
     """
 
     if state.get("status") == "failed":
@@ -45,35 +102,25 @@ def run(state: SearchState) -> SearchState:
         requirements = state.get("requirements", {})
         constraints = requirements.get("constraints", [])
 
-        # Only use properties that have explicit deterministic
-        # numerical constraints.
         search_kwargs = {}
 
         for constraint in constraints:
-            prop = constraint.get("property")
+            prop = _normalize_property_name(
+                constraint.get("property")
+            )
 
             minimum = constraint.get("min")
             maximum = constraint.get("max")
 
-            if prop == "band_gap":
-                if minimum is not None:
-                    search_kwargs["band_gap"] = (
-                        minimum,
-                        maximum if maximum is not None else 1000,
-                    )
-
-            elif prop == "density":
-                if minimum is not None:
-                    search_kwargs["density"] = (
-                        minimum,
-                        maximum if maximum is not None else 1000,
-                    )
-
-            elif prop == "volume":
-                if minimum is not None:
-                    search_kwargs["volume"] = (
-                        minimum,
-                        maximum if maximum is not None else 100000,
+            # Only numerical constraints should be sent to
+            # Materials Project as property filters.
+            if prop in {"band_gap", "density", "volume"}:
+                if (
+                    minimum is not None
+                    or maximum is not None
+                ):
+                    search_kwargs[prop] = _build_range(
+                        constraint
                     )
 
         candidates = []
@@ -97,18 +144,26 @@ def run(state: SearchState) -> SearchState:
                 )
 
                 formation_energy_value = _safe_value(
-                    getattr(doc, "formation_energy_per_atom", None)
+                    getattr(
+                        doc,
+                        "formation_energy_per_atom",
+                        None,
+                    )
                 )
 
                 energy_above_hull_value = _safe_value(
-                    getattr(doc, "energy_above_hull", None)
+                    getattr(
+                        doc,
+                        "energy_above_hull",
+                        None,
+                    )
                 )
 
                 stability_value = _safe_value(
                     getattr(doc, "is_stable", None)
                 )
 
-                crystal_system = getattr(
+                symmetry = getattr(
                     doc,
                     "symmetry",
                     None,
@@ -116,17 +171,35 @@ def run(state: SearchState) -> SearchState:
 
                 crystal_system_value = None
 
-                if crystal_system is not None:
+                if symmetry is not None:
                     crystal_system_value = getattr(
-                        crystal_system,
+                        symmetry,
                         "crystal_system",
                         None,
                     )
 
+                    if hasattr(
+                        crystal_system_value,
+                        "value",
+                    ):
+                        crystal_system_value = (
+                            crystal_system_value.value
+                        )
+
+                    elif crystal_system_value is not None:
+                        crystal_system_value = str(
+                            crystal_system_value
+                        )
+
                 candidate = {
                     "material_id": material_id,
+
                     "formula": str(
-                        getattr(doc, "formula_pretty", "")
+                        getattr(
+                            doc,
+                            "formula_pretty",
+                            "",
+                        )
                     ),
 
                     "density": {
