@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+sse-starlette
+mp-api
+pytest
+httpx
+langgraph
+langchain
+langchain-google-genai
+python-dotenv
